@@ -1,0 +1,22 @@
+# ATS Resume Ranking System - Python dependencies
+# FastAPI stack + SQLAlchemy/SQLite + ChromaDB + PDF/NER/ML tooling
+
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20          # required by FastAPI for File/Form uploads
+
+SQLAlchemy==2.0.36
+pydantic==2.10.4
+
+chromadb==0.5.23                  # PersistentClient vector store
+
+pdfplumber==0.11.4                # PDF text extraction
+
+spacy==3.7.5                      # NLP + NER + PhraseMatcher
+# The en_core_web_sm model is NOT pip-installable from PyPI; install separately:
+#   python -m spacy download en_core_web_sm
+
+scikit-learn==1.6.0               # TfidfVectorizer + cosine_similarity
+# numpy must stay on 1.x for spaCy 3.7.x / thinc 8.2.x binary compatibility.
+# numpy 2.x causes "numpy.dtype size changed" ValueError at import time.
+numpy==1.26.4
