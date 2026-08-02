@@ -1,22 +1,51 @@
-# ATS Resume Ranking System - Python dependencies
-# FastAPI stack + SQLAlchemy/SQLite + ChromaDB + PDF/NER/ML tooling
+# =============================================================================
+# AI Recruitment & Hiring Suite — Python Dependencies
+# =============================================================================
+# Python 3.11+ required (uses asyncio.to_thread, typing.Self, etc.)
+# Install: pip install -r requirements.txt
+# =============================================================================
 
-fastapi==0.115.6
-uvicorn[standard]==0.34.0
-python-multipart==0.0.20          # required by FastAPI for File/Form uploads
+# --- Web framework -----------------------------------------------------------
+fastapi>=0.110.0,<1.0.0          # Async web framework
+uvicorn[standard]>=0.27.0       # ASGI server (standard extras for uvloop)
 
-SQLAlchemy==2.0.36
-pydantic==2.10.4
+# --- Database (PostgreSQL async) ---------------------------------------------
+sqlalchemy[asyncio]>=2.0.25,<3.0.0  # ORM with async support
+asyncpg>=0.29.0                 # Async PostgreSQL driver (asyncpg, not psycopg2)
 
-chromadb==0.5.23                  # PersistentClient vector store
+# --- Vector store (ChromaDB) -------------------------------------------------
+chromadb>=0.4.22,<0.5.0          # Persistent local vector store
+# ChromaDB pulls in sentence-transformers + onnxruntime for the default
+# all-MiniLM-L6-v2 embedding function. No separate install needed.
 
-pdfplumber==0.11.4                # PDF text extraction
+# --- NLP / scoring -----------------------------------------------------------
+scikit-learn>=1.4.0,<2.0.0      # TF-IDF + cosine similarity
+spacy>=3.7.0,<3.8.0             # NER for future resume parsing endpoint
+pdfplumber>=0.10.0              # PDF text extraction for future resume parsing
 
-spacy==3.7.5                      # NLP + NER + PhraseMatcher
-# The en_core_web_sm model is NOT pip-installable from PyPI; install separately:
-#   python -m spacy download en_core_web_sm
+# --- LLM inference (Hugging Face free-tier router) ---------------------------
+# We use plain `requests` to call the HF OpenAI-compatible router.
+# No huggingface_hub SDK needed — the router is a standard REST API.
+requests>=2.31.0                # HTTP client for HF router calls
 
-scikit-learn==1.6.0               # TfidfVectorizer + cosine_similarity
-# numpy must stay on 1.x for spaCy 3.7.x / thinc 8.2.x binary compatibility.
-# numpy 2.x causes "numpy.dtype size changed" ValueError at import time.
-numpy==1.26.4
+# --- Configuration -----------------------------------------------------------
+pydantic>=2.5.0,<3.0.0          # Data validation (v2)
+pydantic-settings>=2.1.0        # Settings management from env/.env
+
+# --- Utilities ---------------------------------------------------------------
+python-multipart>=0.0.6         # FastAPI form/file upload support
+
+# =============================================================================
+# Pinned sub-dependency notes:
+#
+# * numpy: ChromaDB and spaCy may pin numpy. If you see binary-compat errors
+#   with spaCy/thinc, pin numpy<2.0 (numpy 2.x changed the C ABI):
+#       pip install "numpy<2.0"
+#
+# * scipy: scikit-learn requires scipy. The version is managed by pip's
+#   resolver automatically.
+#
+# * torch: sentence-transformers (pulled by ChromaDB) may install torch.
+#   The CPU-only wheel is sufficient for local embedding:
+#       pip install torch --index-url https://download.pytorch.org/whl/cpu
+# =============================================================================
