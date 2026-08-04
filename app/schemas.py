@@ -23,6 +23,21 @@ from datetime import datetime
 from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
+from typing import Literal
+
+
+class RegisterRequest(BaseModel):
+    """Validated credentials used to create a company or candidate account."""
+    email: str = Field(..., min_length=3, max_length=255)
+    password: str = Field(..., min_length=12, max_length=128)
+    full_name: str = Field(..., min_length=1, max_length=255)
+    role: Literal["company", "candidate"]
+
+
+class TokenResponse(BaseModel):
+    """Bearer access token returned after successful authentication."""
+    access_token: str
+    token_type: str = "bearer"
 
 
 # ===========================================================================

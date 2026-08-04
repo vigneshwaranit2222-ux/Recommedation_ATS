@@ -80,7 +80,7 @@ class UserRole(enum.Enum):
     Stored as a Postgres ``ENUM`` so the DB enforces valid values.
     """
 
-    recruiter = "recruiter"
+    company = "company"
     candidate = "candidate"
 
 

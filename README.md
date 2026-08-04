@@ -1,104 +1,96 @@
-# ATS Resume Ranking System
+# AI Recruitment & Hiring Suite
 
-A production-ready FastAPI Applicant Tracking System (ATS) that ranks student
-resumes against posted jobs using a **hybrid scoring strategy**:
+Production-oriented FastAPI backend for LLM-assisted job creation, interview
+question generation, conversational interviews, and explainable resume
+ranking.
 
-| Component | Weight | Description |
-|-----------|--------|-------------|
-| TF-IDF cosine similarity | **50%** | Lexical overlap of job text vs resume text (`TfidfVectorizer` + `cosine_similarity`) |
-| Keyword match % | **35%** | Fraction of required keywords found via case-insensitive word-boundary regex in resume text **or** extracted skills |
-| ChromaDB vector similarity | **15%** | Semantic similarity from Chroma's cosine distance (single query for all resumes) |
+## Architecture
 
-## Tech Stack
+- Python 3.11+, FastAPI, and Uvicorn
+- PostgreSQL with SQLAlchemy 2.0 async ORM and `asyncpg`
+- ChromaDB local persistent embeddings (`all-MiniLM-L6-v2` default embedding)
+- Hugging Face OpenAI-compatible router for chat completion calls
+- TF-IDF, exact keyword matching, and vector similarity for rankings
 
-- **FastAPI** + **uvicorn** — async REST API
-- **SQLAlchemy** + **SQLite** — job metadata persistence
-- **ChromaDB** (PersistentClient) — vector store for jobs & resumes (cosine HNSW)
-- **pdfplumber** — robust PDF text extraction
-- **spaCy** (`en_core_web_sm`) + **PhraseMatcher** — NER for skills, orgs, degrees, locations
-- **scikit-learn** — TF-IDF + cosine similarity
-- **Bootstrap 5** + vanilla JS — frontend served via `StaticFiles`
+The API intentionally does not include JWT authentication, Alembic migrations,
+or PDF-upload resume parsing yet. Configure them before exposing the service to
+untrusted users.
 
-## Project Structure
+## Configuration
 
-```
-ats_ranking_system/
-├── app/
-│   ├── __init__.py        # package marker
-│   ├── database.py        # SQLAlchemy engine/session + JobRequirement model
-│   ├── vector_db.py       # ChromaDB PersistentClient wrapper (cosine collections)
-│   ├── pdf_parser.py      # pdfplumber extraction with error handling
-│   ├── ner_engine.py      # spaCy NER + PhraseMatcher skill extraction
-│   ├── scorer.py          # Hybrid scoring (TF-IDF + keyword + vector)
-│   └── main.py            # FastAPI app, endpoints, static mounting
-├── static/
-│   └── index.html         # Bootstrap 5 UI (3 tabs + live leaderboard)
-├── requirements.txt
-└── README.md
+Copy `.env.example` to `.env` and set the required values:
+
+```powershell
+Copy-Item .env.example .env
 ```
 
-## Setup
+`DATABASE_URL` must use the asyncpg form:
 
-```bash
-# 1. Install Python dependencies
-cd ats_ranking_system
+```text
+postgresql+asyncpg://USER:PASSWORD@HOST:5432/DATABASE
+```
+
+Set `HF_API_TOKEN` to a Hugging Face token and verify that `HF_CHAT_MODEL` is
+currently available through the Hugging Face inference router before deployment.
+Never commit `.env`.
+
+## Local run
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-
-# 2. Download the spaCy English model (required for NER)ll
-python -m spacy download en_core_web_sm
-
-# 3. Run the server
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-Then open:
-- **UI**: http://127.0.0.1:8000/static/index.html
-- **Swagger docs**: http://127.0.0.1:8000/docs
+Open `http://127.0.0.1:8000/docs` for OpenAPI documentation and
+`http://127.0.0.1:8000/health` for the liveness endpoint.
 
-## API Endpoints
+## API
 
-### `POST /post_job/`
-Form fields: `title`, `description`, `required_keywords` (comma-separated).
-Saves to SQLite `job_requirements` **and** indexes into Chroma `company_jobs`.
-Returns `200` on full success, `207` if SQLite succeeded but Chroma failed
-(partial success — SQLite is **not** rolled back).
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| POST | `/api/v1/jobs/generate` | Generate, save, and vector-index a job from `raw_input`. |
+| POST | `/api/v1/jobs/{job_id}/questions` | Generate and save 5-10 interview questions. |
+| POST | `/api/v1/interview/chat` | Start or continue a scored interview session. |
+| POST | `/api/v1/jobs/{job_id}/rank` | Rank supplied candidate resumes with a score breakdown. |
+| GET | `/health` | Process liveness probe. |
 
-### `GET /jobs/`
-Returns all saved jobs (newest first) for the frontend dropdown.
+Hugging Face upstream errors, including provider rate limits, return `502`.
+A job is only reported as created after its Chroma document is indexed.
 
-### `POST /upload_resume/`
-Form fields: `student_id`, `student_name`, `file` (PDF).
-Extracts text with pdfplumber, runs spaCy NER (skills via PhraseMatcher, orgs
-via `ORG`, locations via `GPE`, degrees via regex), and indexes into Chroma
-`student_resumes`. Corrupt/scanned PDFs return `422` with a clear message.
+## Chroma reset after dependency changes
 
-### `POST /rank_candidates/`
-Form field: `job_id`. Fetches **all** resumes from Chroma, scores each against
-the job, and returns candidates ranked highest-to-lowest with full score
-breakdowns and matched/missing keyword lists.
+The old Chroma SQLite layout is incompatible with the configured ChromaDB
+version. Stop the API, then remove only the local vector index and restart:
 
-## Key Design Decisions & Gotchas Handled
+```powershell
+Remove-Item -LiteralPath .\chroma_data -Recurse -Force
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
 
-1. **Cosine HNSW space** — Chroma collections are created with
-   `metadata={"hnsw:space": "cosine"}` so distance is cosine (not L2).
-2. **Metadata type coercion** — Chroma only accepts `str/int/float/bool`;
-   lists (skills, orgs) are joined into CSV strings before storage.
-3. **spaCy model guard** — missing `en_core_web_sm` raises a `RuntimeError`
-   with the exact `python -m spacy download` command.
-4. **207 partial success** — if Chroma indexing fails after SQLite succeeds,
-   SQLite is **not** rolled back; a `207` response is returned instead.
-5. **Single Chroma query** — vector similarity for all resumes is fetched in
-   **one** `query()` call, not one per resume.
-6. **Word-boundary keyword matching** — uses lookarounds
-   `(?<![A-Za-z0-9])...(?![A-Za-z0-9])` so "Java" doesn't match inside
-   "JavaScript" while still matching "C++" / "C#".
-7. **numpy 1.x** — pinned to `1.26.4` for spaCy 3.7.x / thinc 8.2.x binary
-   compatibility (numpy 2.x causes a dtype size mismatch crash).
+This deletes local vector embeddings only. It does not delete PostgreSQL job
+records; regenerate/re-index those jobs before relying on vector ranking.
 
-## Error Handling
+## Docker
 
-Every I/O boundary is wrapped:
-- PDF parsing → `PDFParseError` → `422`
-- SQLite writes → `SQLAlchemyError` → `500` (with rollback)
-- Chroma writes → exception → `500` (or `207` for job indexing)
-- Missing spaCy model → `RuntimeError` → `500` with download command
+Build from the repository root:
+
+```powershell
+docker build -t ai-recruitment-suite .
+docker run --rm -p 8000:8000 --env-file .env -v "${PWD}\chroma_data:/app/chroma_data" ai-recruitment-suite
+```
+
+For managed deployments, use a persistent volume for `CHROMA_PERSIST_DIR` and
+a managed PostgreSQL database. The container does not run migrations; replace
+development `create_all` with Alembic before a production schema change.
+
+## Tests
+
+```powershell
+pytest -q
+```
+
+The suite uses mocked external services and validates question constraints,
+HTTP error translation, interview completion after the final answer, and
+explainable ranking calculations.

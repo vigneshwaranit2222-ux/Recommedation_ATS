@@ -53,7 +53,7 @@ from ..schemas import (
     RankCandidatesResponse,
 )
 from ..services import hf_service
-from ..services.hf_service import HFServiceError, HFRateLimitError
+from ..services.hf_service import HFServiceError
 from ..services.ranking_service import rank_candidates
 from ..services.vector_service import vector_service
 
@@ -93,11 +93,6 @@ async def generate_job(
     # --- 1. Call HF router (sync → thread) ------------------------------
     try:
         job_data = await _run_sync(hf_service.generate_job_description, request.raw_input)
-    except HFRateLimitError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=str(exc),
-        )
     except HFServiceError as exc:
         # 502: upstream dependency failure, not app code failure.
         raise HTTPException(
@@ -137,7 +132,10 @@ async def generate_job(
         # Chroma indexing failure is not fatal — the job is still in Postgres.
         # We log the error but don't fail the request. The chroma_doc_id
         # stays None, and vector similarity will return 0.0 for this job.
-        job.chroma_doc_id = None
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Job was not indexed in ChromaDB: {exc}",
+        ) from exc
 
     # --- 4. Return response ---------------------------------------------
     return JobGenerateResponse(
@@ -188,12 +186,8 @@ async def generate_questions(
             hf_service.generate_interview_questions,
             job_title=job.title,
             job_description=job.description,
+            keywords=job.keywords,
             num_questions=7,
-        )
-    except HFRateLimitError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=str(exc),
         )
     except HFServiceError as exc:
         raise HTTPException(
@@ -364,11 +358,19 @@ async def interview_chat(
             try:
                 per_turn_scores.append(float(turn["score"]))
             except (ValueError, TypeError):
-                pass
+                continue
+
+    last_question: Optional[str] = None
+    if chat_history and chat_history[-1].get("role") == "assistant" and not request.candidate_message:
+        last_assistant_message = str(chat_history[-1].get("content", ""))
+        if any(q in last_assistant_message for q in all_questions):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="candidate_message is required to answer the current interview question.",
+            )
 
     if request.candidate_message and asked_questions:
         # Find the last question asked (the one the candidate is answering).
-        last_question: Optional[str] = None
         for turn in reversed(chat_history):
             if turn.get("role") == "assistant":
                 for q in all_questions:
@@ -420,12 +422,7 @@ async def interview_chat(
         assistant_message = await _run_sync(
             hf_service.run_interview_turn,
             chat_history=chat_history,
-            remaining_questions=remaining_questions,
-        )
-    except HFRateLimitError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=str(exc),
+            next_question=remaining_questions[0] if remaining_questions else "",
         )
     except HFServiceError as exc:
         raise HTTPException(
@@ -445,7 +442,8 @@ async def interview_chat(
 
     remaining_after = [q for q in all_questions if q not in asked_questions]
 
-    is_complete = len(remaining_after) == 0
+    # The last question must be answered before the interview can finish.
+    is_complete = bool(request.candidate_message and last_question) and len(remaining_after) == 0
     final_score: Optional[float] = None
     feedback: Optional[str] = None
 

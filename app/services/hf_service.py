@@ -6,8 +6,8 @@ Calls Hugging Face's unified OpenAI-compatible router
 ``api-inference.huggingface.co/models/<model>`` endpoint.
 
 As of 2026, HF's free serverless tier is unified behind this router. The
-model id is a config value (``HF_CHAT_MODEL``) so it can be swapped without
-a code change — free-tier model availability rotates, and the deployer
+model ids are task-specific config values so they can be swapped without a
+code change — free-tier model availability rotates, and the deployer
 must confirm the current live model at
 https://huggingface.co/models?inference_provider=all&pipeline_tag=text-generation
 
@@ -22,8 +22,8 @@ Key design decisions
   type. The router layer catches this and returns HTTP 502 (upstream
   dependency failure, not app code failure).
 * **HTTP 429 handled explicitly** — HF free-tier rate limits are common.
-  A dedicated ``HFRateLimitError`` subclass lets the router return a
-  clear "rate limited" message instead of a generic 502.
+  They are translated to ``HFServiceError(status_code=502)`` so API clients
+  receive one stable upstream-dependency error contract.
 * **Markdown fence stripping** — LLMs often wrap JSON in `````json``
   fences despite instructions not to. We strip them defensively before
   ``json.loads`` rather than failing.
@@ -66,15 +66,10 @@ class HFServiceError(Exception):
     code. A 500 would imply a bug in our own code.
     """
 
-
-class HFRateLimitError(HFServiceError):
-    """Raised specifically on HTTP 429 (free-tier rate limit).
-
-    This is a subclass of ``HFServiceError`` so existing ``except
-    HFServiceError`` blocks still catch it, but the router can check
-    ``isinstance(exc, HFRateLimitError)`` to return a more specific
-    message.
-    """
+    def __init__(self, detail: str, status_code: int = 502) -> None:
+        super().__init__(detail)
+        self.detail = detail
+        self.status_code = status_code
 
 
 # ---------------------------------------------------------------------------
@@ -105,7 +100,7 @@ def _strip_markdown_fences(text: str) -> str:
 # Core router call
 # ---------------------------------------------------------------------------
 
-def _call_hf_router(messages: list[dict[str, str]]) -> str:
+def _call_hf_router(messages: list[dict[str, str]], model: str) -> str:
     """Call the HF OpenAI-compatible router and return the content string.
 
     Parameters
@@ -124,8 +119,6 @@ def _call_hf_router(messages: list[dict[str, str]]) -> str:
     HFServiceError
         On network errors, non-2xx HTTP (except 429), or unexpected
         response structure.
-    HFRateLimitError
-        On HTTP 429 (free-tier rate limit).
     """
     url = f"{settings.HF_ROUTER_BASE_URL}/chat/completions"
     headers = {
@@ -133,7 +126,7 @@ def _call_hf_router(messages: list[dict[str, str]]) -> str:
         "Content-Type": "application/json",
     }
     payload: dict[str, Any] = {
-        "model": settings.HF_CHAT_MODEL,
+        "model": model,
         "messages": messages,
         "temperature": settings.HF_CHAT_TEMPERATURE,
         "max_tokens": settings.HF_CHAT_MAX_TOKENS,
@@ -156,9 +149,15 @@ def _call_hf_router(messages: list[dict[str, str]]) -> str:
 
     # Handle 429 explicitly — it's the most common HF free-tier error.
     if response.status_code == 429:
-        raise HFRateLimitError(
-            "Hugging Face free-tier rate limit reached (HTTP 429). "
-            "Please wait a moment and retry."
+        raise HFServiceError(
+            "Hugging Face router rate limited this request (HTTP 429). "
+            "Retry after the provider's cooldown period."
+        )
+
+    if response.status_code in {500, 502}:
+        raise HFServiceError(
+            f"Hugging Face router is unavailable (HTTP {response.status_code}): "
+            f"{response.text[:500]}"
         )
 
     # Any other non-2xx is an upstream failure.
@@ -260,7 +259,7 @@ def generate_job_description(raw_input: str) -> dict[str, Any]:
         {"role": "user", "content": raw_input},
     ]
 
-    content = _call_hf_router(messages)
+    content = _call_hf_router(messages, settings.HF_CHAT_MODEL_PRIMARY)
     result = _parse_json_response(content, "job description")
 
     # --- Validate required keys & types --------------------------------
@@ -317,6 +316,7 @@ def generate_job_description(raw_input: str) -> dict[str, Any]:
 def generate_interview_questions(
     job_title: str,
     job_description: str,
+    keywords: list[str],
     num_questions: int = 7,
 ) -> list[dict[str, str]]:
     """Generate interview questions for a job across three categories.
@@ -351,11 +351,12 @@ def generate_interview_questions(
         f'Categories must be one of: "technical", "behavioral", "experience". '
         f"Distribute questions across all three categories.\n\n"
         f"Job Title: {job_title}\n"
-        f"Job Description: {job_description}"
+        f"Job Description: {job_description}\n"
+        f"Required keywords: {', '.join(keywords)}"
     )
     messages = [{"role": "user", "content": system_prompt}]
 
-    content = _call_hf_router(messages)
+    content = _call_hf_router(messages, settings.HF_CHAT_MODEL_PRIMARY)
     result = _parse_json_response(content, "interview questions")
 
     if not isinstance(result, dict) or "questions" not in result:
@@ -368,6 +369,11 @@ def generate_interview_questions(
     if not isinstance(raw_questions, list):
         raise HFServiceError(
             f"HF 'questions' is not a list. Got: {type(raw_questions).__name__}"
+        )
+    if not 5 <= len(raw_questions) <= 10:
+        raise HFServiceError(
+            "HF questions response must contain between 5 and 10 questions; "
+            f"received {len(raw_questions)}."
         )
 
     # --- Validate & normalize each question ---------------------------
@@ -396,9 +402,10 @@ def generate_interview_questions(
             {"question_text": question_text, "category": category}
         )
 
-    if not questions:
+    if not 5 <= len(questions) <= 10:
         raise HFServiceError(
-            "HF questions response contained no valid questions after parsing."
+            "HF questions response must contain 5 to 10 valid question objects "
+            f"after validation; received {len(questions)}."
         )
 
     return questions
@@ -406,7 +413,7 @@ def generate_interview_questions(
 
 def run_interview_turn(
     chat_history: list[dict[str, str]],
-    remaining_questions: list[str],
+    next_question: str,
 ) -> str:
     """Generate the interviewer's next message.
 
@@ -416,9 +423,9 @@ def run_interview_turn(
         The full conversation so far as a list of ``{"role", "content"}``
         dicts (OpenAI message format). The last entry may be a user
         message (the candidate's answer) or empty (first turn).
-    remaining_questions:
-        Questions from the job's bank that have not yet been asked, in
-        order. The model is instructed to ask the first one verbatim.
+    next_question:
+        The exact next question from the persisted job bank. An empty string
+        signals that the final answer was received and a wrap-up is needed.
 
     Returns
     -------
@@ -432,23 +439,21 @@ def run_interview_turn(
     HFServiceError
         If the HF call fails.
     """
-    # Build the system prompt based on whether questions remain.
-    if remaining_questions:
-        questions_list = "\n".join(
-            f"{i + 1}. {q}" for i, q in enumerate(remaining_questions)
+    # The exact database question is appended in Python below. LLMs are good
+    # at a brief acknowledgement, but they must not be trusted to preserve a
+    # persisted question verbatim.
+    if next_question:
+        has_candidate_answer = bool(
+            chat_history and chat_history[-1].get("role") == "user"
         )
+        if not has_candidate_answer:
+            return next_question
+
         system_prompt = (
             "You are an AI interviewer conducting a job interview. "
-            "Follow these rules strictly:\n"
-            "1. If the candidate has just answered a question, acknowledge "
-            "their answer in one sentence.\n"
-            "2. Then ask exactly ONE question verbatim from the remaining "
-            "list below (ask the first one).\n"
-            "3. If this is the first turn (no previous answer to acknowledge), "
-            "just ask the first question.\n"
-            "4. Do not rephrase, modify, or number the question.\n"
-            "5. Return ONLY your message text (no JSON, no markdown fences).\n\n"
-            f"Remaining questions to ask (ask the first one):\n{questions_list}"
+            "acknowledge the candidate's immediately preceding answer in one "
+            "short sentence. Do not ask a question, do not use markdown, and "
+            "do not add any other sentence."
         )
     else:
         system_prompt = (
@@ -466,8 +471,14 @@ def run_interview_turn(
     ]
     messages.extend(chat_history)
 
-    content = _call_hf_router(messages)
-    return content.strip()
+    content = _call_hf_router(messages, settings.HF_CHAT_MODEL_INTERVIEW).strip()
+    if next_question:
+        # Keep at most one acknowledgement sentence, then append the exact
+        # stored question. This guarantees the question bank wording survives
+        # every model response unchanged.
+        acknowledgement = re.split(r"(?<=[.!?])\s+", content, maxsplit=1)[0].strip()
+        return f"{acknowledgement}\n\n{next_question}" if acknowledgement else next_question
+    return content
 
 
 def score_interview_response(
@@ -514,7 +525,7 @@ def score_interview_response(
         {"role": "user", "content": user_message},
     ]
 
-    content = _call_hf_router(messages)
+    content = _call_hf_router(messages, settings.HF_CHAT_MODEL_SCORING)
     result = _parse_json_response(content, "response scoring")
 
     if not isinstance(result, dict) or "score" not in result:

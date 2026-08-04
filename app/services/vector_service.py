@@ -152,7 +152,7 @@ class VectorService:
         """
         result = self.collection.query(
             query_texts=[text],
-            ids=[job_id],
+            where={"job_id": job_id},
             n_results=1,
             include=["distances"],
         )
@@ -166,7 +166,12 @@ class VectorService:
             # Job not found in Chroma — return 0 similarity.
             return 0.0
 
-        distance = float(dist_batch[0])
+        try:
+            distance = float(dist_batch[0])
+        except (TypeError, ValueError):
+            return 0.0
+        if distance != distance:  # NaN is the only float unequal to itself.
+            return 0.0
         # Cosine distance (0=identical, 2=opposite) → similarity [0, 1].
         sim = 1.0 - distance
         return max(0.0, min(1.0, sim))

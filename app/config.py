@@ -15,10 +15,9 @@ Key design decisions
   per-model ``api-inference.huggingface.co/models/<model>`` endpoint is
   deprecated; the router is the single entry point for free-tier chat
   completions.
-* ``HF_CHAT_MODEL`` is a config value (not hardcoded) because free-tier model
-  availability rotates. The default ``meta-llama/Llama-3.1-8B-Instruct`` is
-  a commonly available instruction-tuned model, but **verify it is live on
-  the free tier** at
+* Three task-specific model identifiers are configuration values, not
+  hardcoded request details, because free-tier availability rotates. Verify
+  each configured model is live on the free tier at
   https://huggingface.co/models?inference_provider=all&pipeline_tag=text-generation
   before deploying.
 * JWT settings are placeholders — auth wiring is out of scope for this pass
@@ -56,7 +55,9 @@ class Settings(BaseSettings):
     HF_ROUTER_BASE_URL: str = "https://router.huggingface.co/v1"
     # Chat completions model id. Swappable without code changes.
     # VERIFY this model is live on the free tier before deploying.
-    HF_CHAT_MODEL: str = "meta-llama/Llama-3.1-8B-Instruct"
+    HF_CHAT_MODEL_PRIMARY: str = "Qwen/Qwen2.5-Coder-32B-Instruct"
+    HF_CHAT_MODEL_INTERVIEW: str = "meta-llama/Llama-3.1-8B-Instruct"
+    HF_CHAT_MODEL_SCORING: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B"
     # Max tokens for chat completions. Tuned for structured JSON outputs
     # (job descriptions, question banks, interview turns) which rarely
     # exceed 1024 tokens.
@@ -74,6 +75,7 @@ class Settings(BaseSettings):
     CHROMA_PERSIST_DIR: str = "./chroma_data"
     # Collection name for job documents (title + description + keywords).
     CHROMA_COLLECTION_JOBS: str = "company_jobs"
+    CHROMA_COLLECTION_RESUMES: str = "student_resumes"
 
     # ------------------------------------------------------------------
     # JWT auth (placeholders — wiring is out of scope for this pass)
