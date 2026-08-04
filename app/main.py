@@ -3,25 +3,17 @@
 Creates the FastAPI app, registers the recruitment router, exposes a
 ``/health`` endpoint, and runs ``init_db()`` on startup via the lifespan
 context manager.
-
-Out of scope for this pass
---------------------------
-* JWT auth wiring (config slots exist in ``app/config.py`` but no
-  dependency/middleware is implemented yet).
-* Alembic migrations (``init_db()`` uses ``create_all`` for dev; replace
-  before production).
-* Resume PDF parsing endpoint (``pdf_parser.py`` and ``ner_engine.py``
-  are retained from the legacy codebase for a future
-  ``POST /api/v1/resumes/upload`` endpoint).
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from .database import init_db
 from .routers.chatbot import router as chatbot_router
 from .routers.recruitment import router as recruitment_router
@@ -35,13 +27,7 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Run dev-only table creation on startup.
-
-    .. warning::
-        ``init_db()`` uses ``Base.metadata.create_all`` which only creates
-        missing tables — it does not handle schema evolution. Before
-        production, replace with Alembic migrations.
-    """
+    """Run dev-only table creation on startup."""
     logger.info("Starting AI Recruitment Suite — initializing database...")
     await init_db()
     logger.info("Database initialized. Ready to serve requests.")
@@ -71,6 +57,32 @@ app.include_router(recruitment_router)
 # Include the general-purpose chatbot router.
 app.include_router(chatbot_router)
 
+# Mount static directory if it exists
+if os.path.exists("static"):
+    app.mount("/static", StaticFiles(directory="static"), name="static")
+
+
+# ---------------------------------------------------------------------------
+# Root Endpoint (Serves Frontend SPA or JSON Info)
+# ---------------------------------------------------------------------------
+
+@app.get("/", tags=["root"])
+async def root():
+    """Root endpoint serving static/index.html via FileResponse if available."""
+    index_path = os.path.join("static", "index.html")
+    if os.path.exists(index_path):
+        return FileResponse(index_path)
+    
+    return JSONResponse(
+        content={
+            "service": "AI Recruitment & Hiring Suite",
+            "version": "2.0.0",
+            "docs": "/docs",
+            "health": "/health",
+            "api": "/api/v1",
+        }
+    )
+
 
 # ---------------------------------------------------------------------------
 # Health check
@@ -78,31 +90,9 @@ app.include_router(chatbot_router)
 
 @app.get("/health", tags=["health"])
 async def health_check():
-    """Liveness probe — returns 200 if the process is alive.
-
-    This does **not** check DB or Chroma connectivity. A deeper readiness
-    probe would ping the DB and Chroma, but for a simple liveness check
-    (e.g. Kubernetes livenessProbe) we only need to know the process is
-    serving HTTP.
-    """
+    """Liveness probe — returns 200 if the process is alive."""
     return {
         "status": "ok",
         "service": "AI Recruitment & Hiring Suite",
         "version": "2.0.0",
-    }
-
-
-# ---------------------------------------------------------------------------
-# Root
-# ---------------------------------------------------------------------------
-
-@app.get("/", tags=["root"])
-async def root():
-    """Root endpoint with service info and links."""
-    return {
-        "service": "AI Recruitment & Hiring Suite",
-        "version": "2.0.0",
-        "docs": "/docs",
-        "health": "/health",
-        "api": "/api/v1",
     }

@@ -1,5 +1,5 @@
 """
-Verifies the HF_API_TOKEN and checks each configured model responds on
+Verifies the HF_TOKEN and checks each configured model responds on
 the HF Inference API. Run manually before deployment:
 
     python scripts/check_hf_models.py
@@ -13,7 +13,7 @@ import time
 
 import requests
 
-HF_API_TOKEN = os.environ.get("HF_API_TOKEN")
+HF_TOKEN = os.getenv("HF_TOKEN")
 HF_API_BASE = "https://api-inference.huggingface.co/models"
 
 MODELS = {
@@ -33,16 +33,16 @@ COLD_START_RETRY_WAIT = 10
 
 
 def check_token() -> bool:
-    if not HF_API_TOKEN:
-        print("FAIL: HF_API_TOKEN is not set in the environment.")
+    if not HF_TOKEN:
+        print("FAIL: HF_TOKEN is not set in the environment.")
         return False
-    print("OK: HF_API_TOKEN is set.")
+    print("OK: HF_TOKEN is set.")
     return True
 
 
 def check_model(label: str, model_id: str) -> bool:
     url = f"{HF_API_BASE}/{model_id}"
-    headers = {"Authorization": f"Bearer {HF_API_TOKEN}"}
+    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
     payload = {"inputs": "ping", "parameters": {"max_new_tokens": 1}}
 
     try:

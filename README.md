@@ -30,7 +30,7 @@ Copy-Item .env.example .env
 postgresql+asyncpg://USER:PASSWORD@HOST:5432/DATABASE
 ```
 
-Set `HF_API_TOKEN` to a Hugging Face token and verify that `HF_CHAT_MODEL` is
+Set `HF_TOKEN` to a Hugging Face token and verify that `HF_CHAT_MODEL` is
 currently available through the Hugging Face inference router before deployment.
 Never commit `.env`.
 

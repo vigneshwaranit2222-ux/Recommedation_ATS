@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pydantic import Field, AliasChoices
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -17,7 +18,10 @@ class Settings(BaseSettings):
     # -------------------------
     # Hugging Face
     # -------------------------
-    HF_API_TOKEN: str
+    HF_TOKEN: str = Field(
+        ...,
+        validation_alias=AliasChoices("HF_TOKEN", "HF_API_TOKEN", "HUGGINGFACE_API_KEY"),
+    )
     HF_ROUTER_BASE_URL: str = "https://router.huggingface.co/v1"
 
     HF_CHAT_MODEL_PRIMARY: str = "Qwen/Qwen2.5-Coder-32B-Instruct"

@@ -46,12 +46,17 @@ stable embeddings API the way it does chat completions. See
 from __future__ import annotations
 
 import json
+import os
 import re
 from typing import Any
 
+from dotenv import load_dotenv
 import requests
 
 from ..config import settings
+
+# Explicitly invoke load_dotenv() before reading HF_TOKEN / HUGGINGFACE_API_KEY
+load_dotenv()
 
 
 # ---------------------------------------------------------------------------
@@ -120,9 +125,16 @@ def _call_hf_router(messages: list[dict[str, str]], model: str) -> str:
         On network errors, non-2xx HTTP (except 429), or unexpected
         response structure.
     """
+    load_dotenv()
+    hf_token = os.getenv("HF_TOKEN") or getattr(settings, "HF_TOKEN", None)
+    if not hf_token:
+        raise HFServiceError(
+            "HF_TOKEN is not set in environment or config."
+        )
+
     url = f"{settings.HF_ROUTER_BASE_URL}/chat/completions"
     headers = {
-        "Authorization": f"Bearer {settings.HF_API_TOKEN}",
+        "Authorization": f"Bearer {hf_token}",
         "Content-Type": "application/json",
     }
     payload: dict[str, Any] = {
@@ -133,60 +145,68 @@ def _call_hf_router(messages: list[dict[str, str]], model: str) -> str:
     }
 
     try:
-        response = requests.post(
-            url,
-            headers=headers,
-            json=payload,
-            timeout=settings.HF_REQUEST_TIMEOUT,
-        )
-    except requests.exceptions.Timeout as exc:
+        try:
+            response = requests.post(
+                url,
+                headers=headers,
+                json=payload,
+                timeout=settings.HF_REQUEST_TIMEOUT,
+            )
+        except requests.exceptions.Timeout as exc:
+            raise HFServiceError(
+                f"HF router request timed out after {settings.HF_REQUEST_TIMEOUT}s. "
+                f"The free tier may be under load; retry shortly."
+            ) from exc
+        except requests.RequestException as exc:
+            raise HFServiceError(f"Network error calling HF router: {exc}") from exc
+
+        # Handle 429 explicitly — it's the most common HF free-tier error.
+        if response.status_code == 429:
+            raise HFServiceError(
+                "Hugging Face router rate limited this request (HTTP 429). "
+                "Retry after the provider's cooldown period."
+            )
+
+        if response.status_code in {500, 502}:
+            raise HFServiceError(
+                f"Hugging Face router is unavailable (HTTP {response.status_code}): "
+                f"{response.text[:500]}"
+            )
+
+        # Any other non-2xx is an upstream failure.
+        if not response.ok:
+            raise HFServiceError(
+                f"HF router returned HTTP {response.status_code}: "
+                f"{response.text[:500]}"
+            )
+
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise HFServiceError(
+                f"HF router returned non-JSON response: {exc}"
+            ) from exc
+
+        # OpenAI-compatible response: {"choices": [{"message": {"content": "..."}}]}
+        try:
+            content = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise HFServiceError(
+                f"Unexpected HF router response structure: "
+                f"{json.dumps(data)[:500]}"
+            ) from exc
+
+        if not content or not content.strip():
+            raise HFServiceError("HF router returned an empty content string.")
+
+        return content
+
+    except HFServiceError:
+        raise
+    except Exception as exc:
         raise HFServiceError(
-            f"HF router request timed out after {settings.HF_REQUEST_TIMEOUT}s. "
-            f"The free tier may be under load; retry shortly."
+            f"Unexpected error during Hugging Face API call or response parsing: {exc}"
         ) from exc
-    except requests.RequestException as exc:
-        raise HFServiceError(f"Network error calling HF router: {exc}") from exc
-
-    # Handle 429 explicitly — it's the most common HF free-tier error.
-    if response.status_code == 429:
-        raise HFServiceError(
-            "Hugging Face router rate limited this request (HTTP 429). "
-            "Retry after the provider's cooldown period."
-        )
-
-    if response.status_code in {500, 502}:
-        raise HFServiceError(
-            f"Hugging Face router is unavailable (HTTP {response.status_code}): "
-            f"{response.text[:500]}"
-        )
-
-    # Any other non-2xx is an upstream failure.
-    if not response.ok:
-        raise HFServiceError(
-            f"HF router returned HTTP {response.status_code}: "
-            f"{response.text[:500]}"
-        )
-
-    try:
-        data = response.json()
-    except ValueError as exc:
-        raise HFServiceError(
-            f"HF router returned non-JSON response: {exc}"
-        ) from exc
-
-    # OpenAI-compatible response: {"choices": [{"message": {"content": "..."}}]}
-    try:
-        content = data["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError) as exc:
-        raise HFServiceError(
-            f"Unexpected HF router response structure: "
-            f"{json.dumps(data)[:500]}"
-        ) from exc
-
-    if not content or not content.strip():
-        raise HFServiceError("HF router returned an empty content string.")
-
-    return content
 
 
 def _parse_json_response(content: str, context: str = "") -> dict[str, Any]:
@@ -211,12 +231,24 @@ def _parse_json_response(content: str, context: str = "") -> dict[str, Any]:
     """
     cleaned = _strip_markdown_fences(content)
     try:
-        return json.loads(cleaned)
+        parsed = json.loads(cleaned)
+        if not isinstance(parsed, (dict, list)):
+            raise HFServiceError(
+                f"Parsed JSON for {context or 'response'} is not an object or array. Got: {type(parsed).__name__}"
+            )
+        return parsed
     except json.JSONDecodeError as exc:
         label = f" ({context})" if context else ""
         raise HFServiceError(
             f"Failed to parse JSON from HF response{label}: {exc}. "
             f"Raw content: {content[:500]}"
+        ) from exc
+    except HFServiceError:
+        raise
+    except Exception as exc:
+        label = f" ({context})" if context else ""
+        raise HFServiceError(
+            f"Unexpected error parsing JSON response{label}: {exc}"
         ) from exc
 
 
