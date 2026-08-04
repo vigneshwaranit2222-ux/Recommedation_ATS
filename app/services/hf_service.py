@@ -547,3 +547,58 @@ def score_interview_response(
     feedback = str(result.get("feedback", "")).strip()
 
     return {"score": score, "feedback": feedback}
+
+
+# ---------------------------------------------------------------------------
+# General-purpose chatbot
+# ---------------------------------------------------------------------------
+
+def chat_bot(
+    message: str,
+    chat_history: list[dict[str, str]] | None = None,
+) -> str:
+    """Return a conversational reply from the HF router.
+
+    Parameters
+    ----------
+    message:
+        The user's latest message.
+    chat_history:
+        Optional prior conversation as a list of ``{"role", "content"}``
+        dicts (OpenAI message format). The provided history is appended
+        before the new user message so the model has full context.
+
+    Returns
+    -------
+    str
+        The assistant's reply text.
+
+    Raises
+    ------
+    HFServiceError
+        If the HF call fails or the response is empty.
+    """
+    system_prompt = (
+        "You are a helpful, friendly AI assistant embedded in the AI "
+        "Recruitment & Hiring Suite. You can answer general questions, "
+        "explain the recruitment features, help debug usage, and hold a "
+        "natural conversation. Be concise, accurate, and helpful."
+    )
+
+    # Build the OpenAI-style message list: system prompt + history + new user turn.
+    messages: list[dict[str, str]] = [
+        {"role": "system", "content": system_prompt}
+    ]
+
+    if chat_history:
+        # Only keep well-formed turns to avoid sending malformed data upstream.
+        for turn in chat_history:
+            role = turn.get("role")
+            content = turn.get("content")
+            if role in ("user", "assistant") and content:
+                messages.append({"role": role, "content": str(content)})
+
+    messages.append({"role": "user", "content": message})
+
+    content = _call_hf_router(messages, settings.HF_CHAT_MODEL_PRIMARY)
+    return content.strip()

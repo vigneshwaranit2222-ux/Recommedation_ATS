@@ -23,6 +23,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from .database import init_db
+from .routers.chatbot import router as chatbot_router
 from .routers.recruitment import router as recruitment_router
 
 logger = logging.getLogger(__name__)
@@ -66,6 +67,9 @@ app = FastAPI(
 
 # Include the recruitment router (all four endpoints under /api/v1).
 app.include_router(recruitment_router)
+
+# Include the general-purpose chatbot router.
+app.include_router(chatbot_router)
 
 
 # ---------------------------------------------------------------------------

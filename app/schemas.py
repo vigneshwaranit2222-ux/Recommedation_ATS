@@ -20,10 +20,38 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
-from typing import Literal
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
+
+
+Role = Literal["company", "candidate", "admin"]
+
+
+class UserCreate(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=128)
+    role: Role
+
+
+class UserResponse(BaseModel):
+    id: uuid.UUID
+    email: EmailStr
+    role: Role
+    created_at: datetime
+
+    class Config:
+        from_attributes = True  # pydantic v2 (use orm_mode=True if pydantic v1)
+
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+
+class TokenData(BaseModel):
+    email: Optional[str] = None
+    role: Optional[Role] = None
 
 
 class RegisterRequest(BaseModel):
@@ -298,3 +326,55 @@ class ErrorResponse(BaseModel):
     """
 
     detail: str
+
+
+# ===========================================================================
+# General-purpose chatbot schemas
+# ===========================================================================
+
+class ChatbotMessage(BaseModel):
+    """A single message in the chatbot conversation history.
+
+    ``role`` mirrors the OpenAI chat message format (``"user"`` or
+    ``"assistant"``) so the history can be passed straight to the HF router.
+    """
+
+    role: str = Field(..., pattern="^(assistant|user)$")
+    content: str
+
+
+class ChatbotRequest(BaseModel):
+    """Request body for ``POST /api/v1/chatbot/chat``.
+
+    ``message`` is the user's latest message. ``chat_history`` is optional
+    prior conversation context (list of ``ChatbotMessage`` turns).
+    """
+
+    message: str = Field(
+        ...,
+        min_length=1,
+        max_length=5000,
+        description="The user's latest message to the chatbot.",
+    )
+    chat_history: list[ChatbotMessage] = Field(
+        default_factory=list,
+        description="Optional prior conversation history for context.",
+    )
+
+
+class ChatbotResponse(BaseModel):
+    """Response for ``POST /api/v1/chatbot/chat``.
+
+    Returns the assistant's reply, plus the full updated conversation so
+    the client can render and continue the chat.
+    """
+
+    reply: str = Field(
+        ...,
+        description="The assistant's reply to the user's message.",
+    )
+    chat_history: list[ChatbotMessage] = Field(
+        default_factory=list,
+        description="Updated conversation history including the new turn.",
+    )
+
