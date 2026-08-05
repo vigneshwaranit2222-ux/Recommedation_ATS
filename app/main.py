@@ -15,6 +15,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from .database import init_db
+from .routers.auth import router as auth_router
 from .routers.chatbot import router as chatbot_router
 from .routers.recruitment import router as recruitment_router
 
@@ -51,7 +52,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Include the recruitment router (all four endpoints under /api/v1).
+# Include the authentication router (registration, login, user info).
+app.include_router(auth_router)
+
+# Include the recruitment router (jobs, questions, interview chat, ranking).
 app.include_router(recruitment_router)
 
 # Include the general-purpose chatbot router.
@@ -88,7 +92,7 @@ async def root():
 # Health check
 # ---------------------------------------------------------------------------
 
-@app.get("/health", tags=["health"])
+@app.get("/health", tags=["Health"])
 async def health_check():
     """Liveness probe — returns 200 if the process is alive."""
     return {

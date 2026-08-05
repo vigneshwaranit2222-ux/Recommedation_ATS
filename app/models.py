@@ -82,6 +82,7 @@ class UserRole(enum.Enum):
 
     company = "company"
     candidate = "candidate"
+    admin = "admin"
 
 
 class QuestionCategory(enum.Enum):
@@ -128,7 +129,7 @@ class User(Base):
         String(255),
         nullable=False,
     )
-    full_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    full_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     role: Mapped[UserRole] = mapped_column(
         SAEnum(UserRole, name="user_role", create_constraint=True),
         nullable=False,
@@ -273,7 +274,7 @@ class InterviewQuestion(Base):
     )
     question_text: Mapped[str] = mapped_column(Text, nullable=False)
     category: Mapped[QuestionCategory] = mapped_column(
-        SAEnum(QuestionCategory, name="question_category", create_constraint=True),
+        SAEnum(QuestionCategory, name="question_category", native_enum=False, create_constraint=True),
         nullable=False,
     )
     created_at: Mapped[datetime] = mapped_column(

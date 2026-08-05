@@ -22,7 +22,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 
 Role = Literal["company", "candidate", "admin"]
@@ -36,17 +36,34 @@ class UserCreate(BaseModel):
 
 class UserResponse(BaseModel):
     id: uuid.UUID
+    short_id: Optional[str] = Field(default=None, description="Short candidate ID e.g. c001")
     email: EmailStr
-    role: Role
+    role: str
     created_at: datetime
 
-    class Config:
-        from_attributes = True  # pydantic v2 (use orm_mode=True if pydantic v1)
+    @field_validator("role", mode="before")
+    @classmethod
+    def validate_role(cls, v: Any) -> str:
+        return v.value if hasattr(v, "value") else str(v)
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 class Token(BaseModel):
     access_token: str
+    refresh_token: Optional[str] = None
     token_type: str = "bearer"
+
+
+class LoginRequest(BaseModel):
+    """Clean login request payload with email and password."""
+
+    email: str = Field(..., description="User email address", examples=["user@example.com"])
+    password: str = Field(..., description="User password", examples=["password123"])
+
+
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str
 
 
 class TokenData(BaseModel):
@@ -59,12 +76,13 @@ class RegisterRequest(BaseModel):
     email: str = Field(..., min_length=3, max_length=255)
     password: str = Field(..., min_length=12, max_length=128)
     full_name: str = Field(..., min_length=1, max_length=255)
-    role: Literal["company", "candidate"]
+    role: Literal["company", "candidate", "admin"]
 
 
 class TokenResponse(BaseModel):
     """Bearer access token returned after successful authentication."""
     access_token: str
+    refresh_token: Optional[str] = None
     token_type: str = "bearer"
 
 
@@ -132,6 +150,7 @@ class JobOut(ORMBase):
     """Job response — the canonical job representation over the wire."""
 
     id: uuid.UUID
+    short_id: Optional[str] = Field(default=None, description="Short job ID e.g. j001")
     title: str
     description: str
     keywords: list[str] = Field(default_factory=list)
@@ -191,22 +210,20 @@ class ChatTurn(BaseModel):
 class InterviewChatRequest(BaseModel):
     """Request body for ``POST /api/v1/interview/chat``.
 
-    If ``session_id`` is omitted, a new ``InterviewSession`` is created.
-    If ``candidate_message`` is omitted, the session starts with the first
-    question (or resumes if the session already exists).
+    Accepts standard UUIDs or short IDs (e.g. j001, c001, s001).
     """
 
-    session_id: Optional[uuid.UUID] = Field(
+    session_id: Optional[Any] = Field(
         default=None,
-        description="Omit to start a new interview session.",
+        description="Session UUID or short ID (e.g. s001). Omit to start new session.",
     )
-    candidate_id: uuid.UUID = Field(
-        ...,
-        description="The candidate (User) id for this interview.",
+    candidate_id: Optional[Any] = Field(
+        default=None,
+        description="Candidate UUID or short ID (e.g. c001). Omit to auto-assign.",
     )
-    job_id: uuid.UUID = Field(
+    job_id: Any = Field(
         ...,
-        description="The job being interviewed for.",
+        description="Job UUID or short ID (e.g. j001).",
     )
     candidate_message: Optional[str] = Field(
         default=None,
@@ -217,14 +234,13 @@ class InterviewChatRequest(BaseModel):
 
 
 class InterviewChatResponse(BaseModel):
-    """Response for ``POST /api/v1/interview/chat``.
+    """Response for ``POST /api/v1/interview/chat``."""
 
-    Returns the assistant's latest message and the full session state so
-    the frontend can render the conversation and know when the interview
-    is complete.
-    """
-
+    short_id: Optional[str] = Field(default=None, description="Short session ID e.g. s001")
+    candidate_short_id: Optional[str] = Field(default=None, description="Short candidate ID e.g. c001")
+    job_short_id: Optional[str] = Field(default=None, description="Short job ID e.g. j001")
     session_id: uuid.UUID
+    candidate_id: uuid.UUID
     assistant_message: str = Field(
         ...,
         description="The interviewer's latest message (acknowledgment + next question, or wrap-up).",
@@ -245,6 +261,33 @@ class InterviewChatResponse(BaseModel):
         default_factory=list,
         description="Full conversation history for client-side rendering.",
     )
+
+
+class CreateSessionRequest(BaseModel):
+    """Request body to explicitly create a new interview session."""
+
+    job_id: Any = Field(..., description="Job UUID or short ID (e.g. j001).")
+    candidate_id: Optional[Any] = Field(
+        default=None,
+        description="Optional Candidate UUID or short ID (e.g. c001). Omit to auto-assign.",
+    )
+
+
+class InterviewSessionSummary(BaseModel):
+    """Summary representation of an interview session."""
+
+    short_id: Optional[str] = Field(default=None, description="Short session ID e.g. s001")
+    candidate_short_id: Optional[str] = Field(default=None, description="Short candidate ID e.g. c001")
+    job_short_id: Optional[str] = Field(default=None, description="Short job ID e.g. j001")
+    session_id: uuid.UUID
+    candidate_id: uuid.UUID
+    job_id: uuid.UUID
+    is_complete: bool
+    final_score: Optional[float] = None
+    feedback: Optional[str] = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 # ===========================================================================

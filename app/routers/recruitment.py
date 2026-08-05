@@ -39,14 +39,19 @@ from ..models import (
     InterviewSession,
     JobRequirement,
     QuestionCategory,
+    User,
+    UserRole,
 )
 from ..schemas import (
     CandidateRankResult,
     ChatTurn,
+    CreateSessionRequest,
     InterviewChatRequest,
     InterviewChatResponse,
+    InterviewSessionSummary,
     JobGenerateRequest,
     JobGenerateResponse,
+    JobOut,
     QuestionGenerateResponse,
     QuestionOut,
     RankCandidatesRequest,
@@ -56,8 +61,9 @@ from ..services import hf_service
 from ..services.hf_service import HFServiceError
 from ..services.ranking_service import rank_candidates
 from ..services.vector_service import vector_service
+from ..short_id import format_short_id, get_short_id, resolve_id
 
-router = APIRouter(prefix="/api/v1", tags=["recruitment"])
+router = APIRouter(prefix="/api/v1")
 
 
 # ===========================================================================
@@ -79,7 +85,7 @@ async def _run_sync(func, *args, **kwargs):
 # 1. POST /api/v1/jobs/generate
 # ===========================================================================
 
-@router.post("/jobs/generate", response_model=JobGenerateResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/jobs/generate", response_model=JobGenerateResponse, status_code=status.HTTP_201_CREATED, tags=["Jobs"])
 async def generate_job(
     request: JobGenerateRequest,
     db: AsyncSession = Depends(get_db),
@@ -105,7 +111,7 @@ async def generate_job(
         title=job_data["title"],
         description=job_data["description"],
         keywords=job_data["keywords"],
-        created_by=request.created_by,
+        created_by=None,  # TODO: wire in auth
     )
     try:
         db.add(job)
@@ -149,25 +155,46 @@ async def generate_job(
 
 
 # ===========================================================================
+# 1b. GET /api/v1/jobs
+# ===========================================================================
+
+@router.get("/jobs", response_model=List[JobOut], tags=["Jobs"])
+async def list_jobs(
+    db: AsyncSession = Depends(get_db),
+):
+    """List all available jobs with their UUIDs and short_ids (j001, j002)."""
+    try:
+        result = await db.execute(
+            select(JobRequirement).order_by(JobRequirement.created_at.asc())
+        )
+        jobs = result.scalars().all()
+        resp = []
+        for idx, j in enumerate(jobs, 1):
+            j_out = JobOut.model_validate(j)
+            j_out.short_id = format_short_id("j", idx)
+            resp.append(j_out)
+        return resp
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database error: {exc.__class__.__name__}",
+        )
+
+
+# ===========================================================================
 # 2. POST /api/v1/jobs/{job_id}/questions
 # ===========================================================================
 
-@router.post("/jobs/{job_id}/questions", response_model=QuestionGenerateResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/jobs/{job_id}/questions", response_model=QuestionGenerateResponse, status_code=status.HTTP_201_CREATED, tags=["Questions"])
 async def generate_questions(
-    job_id: uuid.UUID,
+    job_id: str,
     db: AsyncSession = Depends(get_db),
 ):
-    """Generate 5–10 interview questions for a job via the HF router.
-
-    Fetches the job from PostgreSQL (404 if missing). Calls the HF router
-    asking for questions across technical/behavioral/experience categories.
-    Validates/normalizes ``category`` to the enum (defaults to ``technical``
-    if the model returns something unexpected — never drops the question text).
-    Bulk-inserts into ``InterviewQuestion``.
-    """
+    """Generate 5–10 interview questions for a job via the HF router."""
     # --- 1. Fetch job from PostgreSQL -----------------------------------
     try:
-        job = await db.get(JobRequirement, job_id)
+        resolved_job_id = await resolve_id(job_id, JobRequirement, "j", db)
+        job = await db.get(JobRequirement, resolved_job_id) if resolved_job_id else None
     except SQLAlchemyError as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -258,11 +285,20 @@ async def interview_chat(
     The next turn acknowledges the candidate's answer and asks the next
     question verbatim, or wraps up if the bank is exhausted.
     """
+    # Resolve input IDs (UUID or short_id j001, c001, s001)
+    job_uuid = await resolve_id(request.job_id, JobRequirement, "j", db)
+    if not job_uuid:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job requirement {request.job_id} not found.",
+        )
+
     # --- 1. Create or fetch session -------------------------------------
-    if request.session_id is not None:
+    session_uuid = await resolve_id(request.session_id, InterviewSession, "s", db) if request.session_id else None
+    if session_uuid is not None:
         # Fetch existing session.
         try:
-            session = await db.get(InterviewSession, request.session_id)
+            session = await db.get(InterviewSession, session_uuid)
         except SQLAlchemyError as exc:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -275,9 +311,24 @@ async def interview_chat(
             )
     else:
         # Create new session.
+        cand_id = await resolve_id(request.candidate_id, User, "c", db) if request.candidate_id else None
+        if cand_id is None:
+            user_res = await db.execute(select(User.id).limit(1))
+            cand_id = user_res.scalar_one_or_none()
+            if cand_id is None:
+                guest_user = User(
+                    email="guest_candidate@ats.local",
+                    hashed_password="guest_password_123",
+                    full_name="Guest Candidate",
+                    role=UserRole.candidate,
+                )
+                db.add(guest_user)
+                await db.flush()
+                cand_id = guest_user.id
+
         session = InterviewSession(
-            candidate_id=request.candidate_id,
-            job_id=request.job_id,
+            candidate_id=cand_id,
+            job_id=job_uuid,
             chat_history=[],
             is_complete=False,
         )
@@ -292,8 +343,15 @@ async def interview_chat(
 
     # If the interview is already complete, return the final state.
     if session.is_complete:
+        s_short = await get_short_id(session.id, InterviewSession, "s", db)
+        c_short = await get_short_id(session.candidate_id, User, "c", db)
+        j_short = await get_short_id(session.job_id, JobRequirement, "j", db)
         return InterviewChatResponse(
+            short_id=s_short,
+            candidate_short_id=c_short,
+            job_short_id=j_short,
             session_id=session.id,
+            candidate_id=session.candidate_id,
             assistant_message="This interview session is already complete.",
             is_complete=True,
             final_score=session.final_score,
@@ -303,7 +361,7 @@ async def interview_chat(
 
     # --- 2. Fetch the job's question bank -------------------------------
     try:
-        job = await db.get(JobRequirement, request.job_id)
+        job = await db.get(JobRequirement, job_uuid)
     except SQLAlchemyError as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -474,8 +532,15 @@ async def interview_chat(
         )
 
     # --- 8. Return response ---------------------------------------------
+    s_short = await get_short_id(session.id, InterviewSession, "s", db)
+    c_short = await get_short_id(session.candidate_id, User, "c", db)
+    j_short = await get_short_id(session.job_id, JobRequirement, "j", db)
     return InterviewChatResponse(
+        short_id=s_short,
+        candidate_short_id=c_short,
+        job_short_id=j_short,
         session_id=session.id,
+        candidate_id=session.candidate_id,
         assistant_message=assistant_message,
         is_complete=is_complete,
         final_score=final_score,
@@ -485,27 +550,125 @@ async def interview_chat(
 
 
 # ===========================================================================
+# 3b. POST & GET /api/v1/interview/sessions
+# ===========================================================================
+
+@router.post("/interview/sessions", response_model=InterviewSessionSummary, status_code=status.HTTP_201_CREATED, tags=["Interview Chat"])
+async def create_interview_session(
+    request: CreateSessionRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Explicitly create a new interview session and return the generated session_id."""
+    job_uuid = await resolve_id(request.job_id, JobRequirement, "j", db)
+    if job_uuid is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job requirement {request.job_id} not found.",
+        )
+
+    cand_id = await resolve_id(request.candidate_id, User, "c", db) if request.candidate_id else None
+    if cand_id is None:
+        user_res = await db.execute(select(User.id).limit(1))
+        cand_id = user_res.scalar_one_or_none()
+        if cand_id is None:
+            guest_user = User(
+                email="guest_candidate@ats.local",
+                hashed_password="guest_password_123",
+                full_name="Guest Candidate",
+                role=UserRole.candidate,
+            )
+            db.add(guest_user)
+            await db.flush()
+            cand_id = guest_user.id
+
+    session = InterviewSession(
+        candidate_id=cand_id,
+        job_id=job_uuid,
+        chat_history=[],
+        is_complete=False,
+    )
+    db.add(session)
+    await db.flush()
+
+    s_short = await get_short_id(session.id, InterviewSession, "s", db)
+    c_short = await get_short_id(session.candidate_id, User, "c", db)
+    j_short = await get_short_id(session.job_id, JobRequirement, "j", db)
+
+    return InterviewSessionSummary(
+        short_id=s_short,
+        candidate_short_id=c_short,
+        job_short_id=j_short,
+        session_id=session.id,
+        candidate_id=session.candidate_id,
+        job_id=session.job_id,
+        is_complete=session.is_complete,
+        final_score=session.final_score,
+        feedback=session.feedback,
+        created_at=session.created_at,
+    )
+
+
+@router.get("/interview/sessions", response_model=List[InterviewSessionSummary], tags=["Interview Chat"])
+async def list_interview_sessions(
+    candidate_id: Optional[str] = None,
+    job_id: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Retrieve interview sessions with UUIDs and short IDs (s001, c001, j001)."""
+    try:
+        cand_uuid = await resolve_id(candidate_id, User, "c", db) if candidate_id else None
+        job_uuid = await resolve_id(job_id, JobRequirement, "j", db) if job_id else None
+
+        query = select(InterviewSession).order_by(InterviewSession.created_at.asc())
+        if cand_uuid:
+            query = query.where(InterviewSession.candidate_id == cand_uuid)
+        if job_uuid:
+            query = query.where(InterviewSession.job_id == job_uuid)
+
+        result = await db.execute(query)
+        sessions = result.scalars().all()
+
+        resp = []
+        for idx, s in enumerate(sessions, 1):
+            c_short = await get_short_id(s.candidate_id, User, "c", db)
+            j_short = await get_short_id(s.job_id, JobRequirement, "j", db)
+            resp.append(
+                InterviewSessionSummary(
+                    short_id=format_short_id("s", idx),
+                    candidate_short_id=c_short,
+                    job_short_id=j_short,
+                    session_id=s.id,
+                    candidate_id=s.candidate_id,
+                    job_id=s.job_id,
+                    is_complete=s.is_complete,
+                    final_score=s.final_score,
+                    feedback=s.feedback,
+                    created_at=s.created_at,
+                )
+            )
+        return resp
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database error: {exc.__class__.__name__}",
+        )
+
+
+# ===========================================================================
 # 4. POST /api/v1/jobs/{job_id}/rank
 # ===========================================================================
 
-@router.post("/jobs/{job_id}/rank", response_model=RankCandidatesResponse)
+@router.post("/jobs/{job_id}/rank", response_model=RankCandidatesResponse, tags=["Resume Ranking"])
 async def rank_candidates_endpoint(
-    job_id: uuid.UUID,
+    job_id: str,
     request: RankCandidatesRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """Rank candidates against a job using the hybrid scoring strategy.
-
-    Computes three signals per candidate:
-    - 50% TF-IDF cosine similarity (batch-fitted over all resumes).
-    - 35% keyword match (word-boundary regex).
-    - 15% ChromaDB vector similarity (id-restricted query).
-
-    Returns all four scores per candidate, sorted descending by final score.
-    """
+    """Rank candidates against a job using the hybrid scoring strategy."""
     # --- 1. Fetch job from PostgreSQL -----------------------------------
     try:
-        job = await db.get(JobRequirement, job_id)
+        resolved_job_id = await resolve_id(job_id, JobRequirement, "j", db)
+        job = await db.get(JobRequirement, resolved_job_id) if resolved_job_id else None
     except SQLAlchemyError as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

@@ -26,7 +26,7 @@ from ..schemas import ChatbotRequest, ChatbotResponse
 from ..services import hf_service
 from ..services.hf_service import HFServiceError
 
-router = APIRouter(prefix="/api/v1", tags=["chatbot"])
+router = APIRouter(prefix="/api/v1", tags=["Chatbot"])
 
 
 # ===========================================================================
@@ -48,7 +48,7 @@ async def _run_sync(func, *args, **kwargs):
 # 1. POST /api/v1/chatbot/chat
 # ===========================================================================
 
-@router.post("/chatbot/chat", response_model=ChatbotResponse)
+@router.post("/chatbot/chat", response_model=ChatbotResponse, tags=["Chatbot"])
 async def chatbot_chat(
     request: ChatbotRequest,
 ):
